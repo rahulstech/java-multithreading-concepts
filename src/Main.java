@@ -157,9 +157,10 @@ public class Main {
                     ids = connectedClients.keySet().stream().toList();
                 }
                 finally {
+                    // unlock connectedClients
                     lockConnectedClients.readLock().unlock();
                 }
-                // unlock connectedClients
+
                 for (int id : ids) {
                     List<Message> messages;
                     // lock messageDb
