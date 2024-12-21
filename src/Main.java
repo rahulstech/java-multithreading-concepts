@@ -1,6 +1,7 @@
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.locks.*;
 
 public class Main {
 
@@ -62,9 +63,11 @@ public class Main {
 
         ExecutorService executor = Executors.newCachedThreadPool();
 
-        final Object monitorConnectedClients = new Object();
+        final ReadWriteLock lockConnectedClients = new ReentrantReadWriteLock();
 
-        final Object monitorMessageDb = new Object();
+        final Lock lockMessageDb = new ReentrantLock();
+
+        final Condition conditionMessageDb = lockMessageDb.newCondition();
 
         Server() {
             int id;
@@ -80,8 +83,14 @@ public class Main {
             for (int i = 0; i < MAX_CLIENTS; i++) {
                 Thread.sleep(100*i);
                 Client client = newClient();
-                synchronized (monitorConnectedClients) {
+                try {
+                    // lock connectClients
+                    lockConnectedClients.writeLock().lock();
                     connectedClients.put(client.id, client);
+                }
+                finally {
+                    // unlock connectedClients
+                    lockConnectedClients.writeLock().unlock();
                 }
                 serveClient(client);
             }
@@ -114,39 +123,54 @@ public class Main {
         }
 
         void sendMessage(int sender, int receiver, String message) {
-            // lock messageDb
-            synchronized (monitorMessageDb) {
+            try {
+                // lock messageDb
+                lockMessageDb.lock();
                 List<Message> messages = messageDb.computeIfAbsent(receiver, key -> new ArrayList<>());
                 Message msg = new Message(sender, message);
                 messages.add(msg);
                 // notify messageDb is readable
-                monitorMessageDb.notify();
+                conditionMessageDb.signal();
+            }
+            finally {
                 // unlock messageDb
+                lockMessageDb.unlock();
             }
         }
 
         void pushPendingMessages() {
             while (true) {
                 // wait till there is any pending message
-                synchronized (monitorMessageDb) {
-                    try { monitorMessageDb.wait(); }
-                    catch (InterruptedException ex) { ex.printStackTrace(); }
+                try {
+                    lockMessageDb.lock();
+                    conditionMessageDb.await();
+                }
+                catch (InterruptedException ex) { ex.printStackTrace(); }
+                finally {
+                    lockMessageDb.unlock();
                 }
 
                 List<Integer> ids;
                 // lock connectedClients
-                synchronized (monitorConnectedClients) {
+                try {
+                    lockConnectedClients.readLock().lock();
                     ids = connectedClients.keySet().stream().toList();
+                }
+                finally {
+                    lockConnectedClients.readLock().unlock();
                 }
                 // unlock connectedClients
                 for (int id : ids) {
-
                     List<Message> messages;
                     // lock messageDb
-                    synchronized (monitorMessageDb) {
+                    try {
+                        lockMessageDb.lock();
                         messages = messageDb.remove(id);
                     }
-                    // unlock messageDb
+                    finally {
+                        // unlock messageDb
+                        lockMessageDb.unlock();
+                    }
 
                     if (null == messages) {
                         continue;
@@ -154,10 +178,14 @@ public class Main {
 
                     Client client;
                     // lock connectedClients
-                    synchronized (monitorConnectedClients) {
+                    try {
+                        lockConnectedClients.readLock().lock();
                         client = connectedClients.get(id);
                     }
-                    // unlock connectedClient
+                    finally {
+                        // unlock connectedClient
+                        lockConnectedClients.readLock().unlock();
+                    }
 
                     if (null == client) {
                         continue;
