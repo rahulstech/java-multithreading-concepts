@@ -22,27 +22,29 @@ public class FixedThreadPool {
 
     final Lock activeThreadsLock = new ReentrantLock();
 
-//    final ThreadData<Boolean> cancelFlag = new ThreadData<>(false);
-
     boolean stopped = false;
 
     public FixedThreadPool(int nThreads) {
         this.nThreads = Math.min(MAX_THREADS, nThreads);
     }
 
-    public void execute(Callable<?> task) {
+    public TaskControl<?> execute(Callable<?> task) {
         if (stopped) {
             throw new IllegalStateException("Pool was already stopped, can not accept more task");
         }
         // step1 push the task to the queue
-        pushTask(task);
+        TaskControl<?> control = pushTask(task);
 
         // step2 start a thread
         runTask();
+
+        return control;
     }
 
-    private void pushTask(Callable<?> task) {
-        taskQueue.push(task);
+    private <T> TaskControl<T> pushTask(Callable<T> task) {
+        TaskControlImpl<T> control = new TaskControlImpl<>(task);
+        taskQueue.push(control);
+        return control;
     }
 
     private Callable<?> popTask() throws InterruptedException {
@@ -72,7 +74,6 @@ public class FixedThreadPool {
             activeThreadsLock.lock();
             System.out.println("removing thread: "+thread.getName());
             activeThreads.remove(thread);
-//            cancelFlag.remove(thread);
         }
         finally {
             activeThreadsLock.unlock();
@@ -82,22 +83,12 @@ public class FixedThreadPool {
     private void run() {
         while (true) {
             try {
-
-//                if (cancelFlag.get()) {
-//                    break;
-//                }
-
                 // pop a task and run the task in a thread
-                Callable<?> task = popTask();
+                TaskControlImpl<?> task = (TaskControlImpl<?>) popTask();
                 if (null == task) {
                     break;
                 }
-                try {
-                    task.call();
-                }
-                catch (Exception ex) {
-                    System.out.println("task raised exception: "+ex.getMessage());
-                }
+                task.execute();
             }
             catch (InterruptedException ex) {
                 ex.printStackTrace();
@@ -135,8 +126,147 @@ public class FixedThreadPool {
             activeThreadsLock.unlock();
         }
         for (Thread t : copy) {
-            t.interrupt(); // why I need to call this?
-//            cancelFlag.set(t,true);
+            t.interrupt(); // why? = otherwise thread may await infinitely
+        }
+        copy.clear(); // clear the copy to help gc
+    }
+
+    private class TaskControlImpl<T> implements TaskControl<T>, Callable<T> {
+
+        private boolean finished = false;
+
+        private final Object lockCanceled = new Object();
+
+        private boolean canceled = false;
+
+        private T result;
+
+        private Exception exception;
+
+        private final Lock lockResult = new ReentrantLock();
+
+        private final Condition conditionResult = lockResult.newCondition();
+
+        private final Callable<T> task;
+
+        public TaskControlImpl(Callable<T> task) {
+            this.task = task;
+        }
+
+        @Override
+        public T get() {
+            try {
+                lockResult.lock();
+                if (!finished) {
+                    conditionResult.await();
+                }
+            }
+            catch (InterruptedException ex) {
+                ex.printStackTrace();
+            }
+            finally {
+                lockResult.unlock();
+            }
+            return result;
+        }
+
+        public void set(T result) {
+            try {
+                lockResult.lock();
+                this.result = result;
+                markFinished();
+            }
+            finally {
+                lockResult.unlock();
+            }
+        }
+
+        @Override
+        public void cancel() {
+            synchronized (lockCanceled) {
+                canceled = true;
+            }
+        }
+
+        @Override
+        public boolean isCanceled() {
+            synchronized (lockCanceled) {
+                return canceled;
+            }
+        }
+
+        @Override
+        public Exception getException() {
+            try {
+                lockResult.lock();
+                if (!finished) {
+                    conditionResult.await();
+                }
+            }
+            catch (InterruptedException ex) {
+                ex.printStackTrace();
+            }
+            finally {
+                lockResult.unlock();
+            }
+            return exception;
+        }
+
+        public void setException(Exception exception) {
+            try {
+                lockResult.lock();
+                this.exception = exception;
+                markFinished();
+            }
+            finally {
+                lockResult.unlock();
+            }
+        }
+
+        // Due to some historial implementation I have to use the Callable interface
+        // otherwise I can simply use Runnable. Hence, this call has no use here
+        @Override
+        public T call() throws Exception {return null;}
+
+        public void execute() {
+            // this method is called from a worker thread
+            try {
+                // if task is canceled before starting of execution
+                // then mark it as finished and return
+                if (isCanceled()) {
+                    markFinished();
+                    return;
+                }
+
+                T result = task.call();
+                // if task is canceled before completion of execution
+                // then mark it as finished and don't set result
+                if (isCanceled()) {
+                    markFinished();
+                    return;
+                }
+                set(result);
+            }
+            catch (Exception ex) {
+                // if task is canceled before completion of execution
+                // then mark it as finished and don't set exception
+                if (isCanceled()) {
+                    markFinished();
+                    return;
+                }
+                setException(ex);
+            }
+        }
+
+        private void markFinished() {
+            try {
+                lockResult.lock();
+                finished = true;
+                conditionResult.signalAll();
+            }
+            finally {
+                lockResult.unlock();
+            }
         }
     }
 }
