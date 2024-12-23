@@ -131,7 +131,7 @@ public class FixedThreadPool {
         copy.clear(); // clear the copy to help gc
     }
 
-    private class TaskControlImpl<T> implements TaskControl<T>, Callable<T> {
+    private static class TaskControlImpl<T> implements TaskControl<T>, Callable<T> {
 
         private boolean finished = false;
 
@@ -154,15 +154,12 @@ public class FixedThreadPool {
         }
 
         @Override
-        public T get() {
+        public T get() throws InterruptedException {
             try {
                 lockResult.lock();
                 if (!finished) {
                     conditionResult.await();
                 }
-            }
-            catch (InterruptedException ex) {
-                ex.printStackTrace();
             }
             finally {
                 lockResult.unlock();
@@ -183,6 +180,15 @@ public class FixedThreadPool {
 
         @Override
         public void cancel() {
+            try {
+                lockResult.lock();
+                if (finished) {
+                    throw new IllegalStateException("can not cancel finished task");
+                }
+            }
+            finally {
+                lockResult.unlock();
+            }
             synchronized (lockCanceled) {
                 canceled = true;
             }
@@ -196,15 +202,12 @@ public class FixedThreadPool {
         }
 
         @Override
-        public Exception getException() {
+        public Exception getException() throws InterruptedException {
             try {
                 lockResult.lock();
                 if (!finished) {
                     conditionResult.await();
                 }
-            }
-            catch (InterruptedException ex) {
-                ex.printStackTrace();
             }
             finally {
                 lockResult.unlock();
